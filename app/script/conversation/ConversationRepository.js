@@ -356,15 +356,7 @@ z.conversation.ConversationRepository = class ConversationRepository {
 
     return this.conversation_service.load_event_from_db(conversationEntity.id, messageId).then(event => {
       if (event) {
-        return Promise.resolve()
-          .then(() => this.event_mapper.mapJsonEvent(event, conversationEntity))
-          .catch(error => {
-            const errorMessage = `Failed to get and map event of type '${event.type}': ${error.message}`;
-            this.logger.error(errorMessage, {error, event});
-            Raygun.send(new Error(errorMessage), {eventType: event.type});
-
-            throw new z.conversation.ConversationError(z.conversation.ConversationError.TYPE.MESSAGE_NOT_FOUND);
-          });
+        return this.event_mapper.mapJsonEvent(event, conversationEntity);
       }
       throw new z.conversation.ConversationError(z.conversation.ConversationError.TYPE.MESSAGE_NOT_FOUND);
     });
@@ -488,10 +480,10 @@ z.conversation.ConversationRepository = class ConversationRepository {
    * @returns {Promise} Array of message entities
    */
   get_events_for_category(conversationEntity, category = z.message.MessageCategory.NONE) {
-    return this.conversation_service.load_events_with_category_from_db(conversationEntity.id, category).then(events => {
-      const messageEntities = this.event_mapper.mapJsonEvents(events, conversationEntity);
-      return Promise.all(messageEntities.map(messageEntity => this._updateMessageUserEntities(messageEntity)));
-    });
+    return this.conversation_service
+      .load_events_with_category_from_db(conversationEntity.id, category)
+      .then(events => this.event_mapper.mapJsonEvents(events, conversationEntity))
+      .then(messageEntities => this._updateMessagesUserEntities(messageEntities));
   }
 
   /**
@@ -508,10 +500,8 @@ z.conversation.ConversationRepository = class ConversationRepository {
 
     return this.conversation_service
       .search_in_conversation(conversationEntity.id, query)
-      .then(events => {
-        const messageEntities = this.event_mapper.mapJsonEvents(events, conversationEntity);
-        return Promise.all(messageEntities.map(messageEntity => this._updateMessageUserEntities(messageEntity)));
-      })
+      .then(events => this.event_mapper.mapJsonEvents(events, conversationEntity))
+      .then(messageEntities => this._updateMessagesUserEntities(messageEntities))
       .then(messageEntities => ({messageEntities, query}));
   }
 
@@ -2797,7 +2787,13 @@ z.conversation.ConversationRepository = class ConversationRepository {
             return this._onAddEvent(conversationEntity, eventJson);
         }
       })
-      .then((entityObject = {}) => this._handledConversationEvent(entityObject, eventSource, previouslyArchived));
+      .then((entityObject = {}) => this._handledConversationEvent(entityObject, eventSource, previouslyArchived))
+      .catch(error => {
+        const isMessageNotFound = error.type === z.conversation.ConversationError.TYPE.MESSAGE_NOT_FOUND;
+        if (!isMessageNotFound) {
+          throw error;
+        }
+      });
   }
 
   _handledConversationEvent(entityObject = {}, eventSource, previouslyArchived) {
@@ -2888,8 +2884,8 @@ z.conversation.ConversationRepository = class ConversationRepository {
   }
 
   _on1to1Creation(conversationEntity, eventJson) {
-    return Promise.resolve()
-      .then(() => this.event_mapper.mapJsonEvent(eventJson, conversationEntity))
+    return this.event_mapper
+      .mapJsonEvent(eventJson, conversationEntity)
       .then(messageEntity => this._updateMessageUserEntities(messageEntity))
       .then(messageEntity => {
         if (conversationEntity && messageEntity) {
@@ -3014,8 +3010,8 @@ z.conversation.ConversationRepository = class ConversationRepository {
   }
 
   _onGroupCreation(conversationEntity, eventJson) {
-    return Promise.resolve()
-      .then(() => this.event_mapper.mapJsonEvent(eventJson, conversationEntity))
+    return this.event_mapper
+      .mapJsonEvent(eventJson, conversationEntity)
       .then(messageEntity => {
         const creatorId = conversationEntity.creator;
         const createdByParticipant = !!conversationEntity.participating_user_ids().find(userId => userId === creatorId);
@@ -3203,11 +3199,6 @@ z.conversation.ConversationRepository = class ConversationRepository {
       .then(updated_event_json => {
         if (updated_event_json) {
           return this._onAddEvent(conversation_et, updated_event_json);
-        }
-      })
-      .catch(error => {
-        if (error.type !== z.conversation.ConversationError.TYPE.MESSAGE_NOT_FOUND) {
-          throw error;
         }
       });
   }
@@ -3422,8 +3413,8 @@ z.conversation.ConversationRepository = class ConversationRepository {
    * @returns {Promise} Promise that resolves with the message entity for the event
    */
   _add_event_to_conversation(json, conversation_et) {
-    return Promise.resolve()
-      .then(() => this.event_mapper.mapJsonEvent(json, conversation_et, true))
+    return this.event_mapper
+      .mapJsonEvent(json, conversation_et, true)
       .then(message_et => this._updateMessageUserEntities(message_et))
       .then(message_et => {
         if (conversation_et && message_et) {
@@ -3444,19 +3435,17 @@ z.conversation.ConversationRepository = class ConversationRepository {
    * @returns {Promise} Resolves with an array of mapped messages
    */
   _add_events_to_conversation(events, conversation_et, prepend = true) {
-    return Promise.resolve()
-      .then(() => {
-        const message_ets = this.event_mapper.mapJsonEvents(events, conversation_et, true);
-        return Promise.all(message_ets.map(message_et => this._updateMessageUserEntities(message_et)));
-      })
-      .then(message_ets => {
+    return this.event_mapper
+      .mapJsonEvents(events, conversation_et, true)
+      .then(messageEntities => this._updateMessagesUserEntities(messageEntities))
+      .then(messageEntities => {
         if (prepend && conversation_et.messages().length) {
-          conversation_et.prepend_messages(message_ets);
+          conversation_et.prepend_messages(messageEntities);
         } else {
-          conversation_et.add_messages(message_ets);
+          conversation_et.add_messages(messageEntities);
         }
 
-        return message_ets;
+        return messageEntities;
       });
   }
 
@@ -3497,6 +3486,10 @@ z.conversation.ConversationRepository = class ConversationRepository {
     }
 
     return Promise.resolve({conversationEntity});
+  }
+
+  _updateMessagesUserEntities(messageEntities) {
+    return Promise.all(messageEntities.map(messageEntity => this._updateMessageUserEntities(messageEntity)));
   }
 
   /**
